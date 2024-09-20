@@ -1,3 +1,5 @@
+
+
 #include "llm.h"
 #include <curl/curl.h>
 #include <json.hpp>
@@ -6,7 +8,7 @@
 
 using json = nlohmann::json;
 
-const char* LLM_API_URL = "http://localhost:8080/completion";
+const char* LLM_API_URL = "http://localhost:8080/v1/chat/completions";
 
 size_t write_callback(void* contents, size_t size, size_t nmemb, std::string* s) {
     size_t newLength = size * nmemb;
@@ -45,8 +47,9 @@ void LLM::run() {
             headers = curl_slist_append(headers, "Content-Type: application/json");
 
             json request_data = {
-                {"prompt", message},
-                {"n_predict", 128},
+                {"messages", json::array({
+                    {{"role", "user"}, {"content", message}}
+                })},
                 {"stream", true}
             };
 
@@ -61,26 +64,50 @@ void LLM::run() {
             CURLcode res = curl_easy_perform(curl);
 
             if (res == CURLE_OK) {
+                std::istringstream response_stream(response_string);
                 std::string line;
                 std::string accumulated_response;
-                const char* ptr = response_string.c_str();
-                while (*ptr) {
-                    if (*ptr == '\n') {
-                        if (line.compare(0, 6, "data: ") == 0) {
-                            json response_json = json::parse(line.substr(6));
-                            std::string token = response_json["content"];
-                            accumulated_response += token;
+                
+                while (std::getline(response_stream, line)) {
+                    // Trim leading and trailing whitespace
+                    line.erase(0, line.find_first_not_of(" \n\r\t"));
+                    line.erase(line.find_last_not_of(" \n\r\t") + 1);
 
-                            // Notify GUI of new token
-                            if (on_token_received) {
-                                on_token_received(token);
-                            }
+                    if (line.empty()) continue;
+
+                    if (line.compare(0, 6, "data: ") == 0) {
+                        std::string json_str = line.substr(6);
+                        
+                        // Handle special case for "[DONE]"
+                        if (json_str == "[DONE]") {
+                            std::cout << "Received [DONE] signal" << std::endl;
+                            break;
                         }
-                        line.clear();
+
+                        try {
+                            json response_json = json::parse(json_str);
+                            if (response_json.contains("choices") && 
+                                !response_json["choices"].empty() && 
+                                response_json["choices"][0].contains("delta") &&
+                                response_json["choices"][0]["delta"].contains("content")) {
+                                
+                                std::string token = response_json["choices"][0]["delta"]["content"];
+                                accumulated_response += token;
+
+                                // Notify GUI of new token
+                                if (on_token_received) {
+                                    on_token_received(token);
+                                }
+                            }
+                        } catch (json::parse_error& e) {
+                            std::cerr << "JSON parse error: " << e.what() << std::endl;
+                            std::cerr << "Problematic line: " << line << std::endl;
+                        } catch (std::exception& e) {
+                            std::cerr << "Error processing response: " << e.what() << std::endl;
+                        }
                     } else {
-                        line += *ptr;
+                        std::cout << "Received non-data line: " << line << std::endl;
                     }
-                    ptr++;
                 }
 
                 // Notify GUI of complete response
@@ -96,3 +123,5 @@ void LLM::run() {
         }
     }
 }
+
+
